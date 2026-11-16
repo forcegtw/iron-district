@@ -8,7 +8,7 @@ import { PALETTE } from './palette.js';
 
 // Named boxes a fight can move around; bots and their routes read this list.
 // Each entry: [width, height, depth, x, y, z, material]
-const BLOCKS = [
+const PROPS = [
   // Ground and the four boundary walls.
   [34.4, 0.4, 30.4, 0, -0.2, 0, 'canvas'],
   [0.4, 5.2, 30.4, -17.2, 2.6, 0, 'surface'],
@@ -52,9 +52,9 @@ const BLOCKS = [
   [2.2, 1.0, 1.2, 6.0, 0.5, 13.0, 'hairline'],
 ];
 
-// Waypoints per lane, from the Torch spawn at the south wall to the plant site and
+// Waypoints per lane, from the T spawn point at the south wall to the plant site and
 // back out. Bots follow one route each and cut to the site once they carry.
-export const ROUTES = {
+export const PATHS = {
   mid: [
     [0, 13.2], [0, 9.0], [0, 3.4], [0, -1.0], [0, -6.0],
     [-2.0, -10.5], [-4.0, -12.5], [-4.0, 4.0], [-4.0, 9.0], [-2.0, 13.0],
@@ -74,12 +74,14 @@ export const ROUTES = {
 // Spawn rows and the plant spot, in one place so bots, rounds and shots agree.
 export const ATTACKER_SPAWNS = [[-7.0, 13.2], [0, 13.2], [7.0, 13.2]];
 export const DEFENDER_SPAWNS = [[-4.0, -12.8], [0, -12.8], [4.0, -12.8]];
-export const DEVICE_SPOT = [-12.0, -12.6];
+export const PLANT_SPOT = [-12.0, -12.6];
 
 export function createWorld(scene) {
   const group = new THREE.Group();
   scene.add(group);
 
+  // One MeshStandardMaterial per palette colour; roughness splits matte ground from
+  // the slightly glossier painted props.
   const materials = {};
   for (const name of Object.keys(PALETTE)) {
     materials[name] = new THREE.MeshStandardMaterial({
@@ -93,6 +95,7 @@ export function createWorld(scene) {
   const shootables = [];
   const geometryCache = new Map();
 
+  // Boxes repeat a lot (crates), so geometries are memoised by their dimensions.
   function geometry(width, height, depth) {
     const key = `${width}|${height}|${depth}`;
     let geo = geometryCache.get(key);
@@ -117,7 +120,7 @@ export function createWorld(scene) {
     return mesh;
   }
 
-  for (const [w, h, d, x, y, z, m] of BLOCKS) box(w, h, d, x, y, z, m);
+  for (const [w, h, d, x, y, z, m] of PROPS) box(w, h, d, x, y, z, m);
 
   // Light: a cold dusk sky, one warm work-lamp over the mid lane, one long key.
   const sky = new THREE.HemisphereLight(new THREE.Color(PALETTE.ink), new THREE.Color(PALETTE.hairline), 4.0);

@@ -1,65 +1,64 @@
-// Session statistics: every trigger pull, hit, headshot and point of damage flows
-// through here, and the end-of-round panel renders the ledger. Accuracy counts
-// pellets individually for the scatter gun, so the number stays honest per shot
-// fired rather than per trigger squeeze. Streaks reset on death and award nothing
-// by themselves: they are information the player reads, not a scoring rule.
+// Per-session stat ledger. The game calls one record function per sim event and the
+// HUD asks for a DOM render at round end, so nothing here runs inside the frame loop.
+// The scatter gun's pellets each count as a shot, keeping accuracy per projectile.
 
-export function createStats() {
-  const state = {
-    shotsFired: 0,      // one per projectile (a trigger pull with pellets counts 8)
+function freshLedger() {
+  return {
+    shotsFired: 0,       // projectiles launched, pellets counted one by one
     shotsHit: 0,
     headshots: 0,
     damageDealt: 0,
     damageTaken: 0,
     kills: 0,
-    killsByGun: {},     // gun kind -> count
-    streak: 0,
+    killsByGun: {},      // weapon kind -> kill tally
+    streak: 0,           // consecutive kills without dying
     bestStreak: 0,
     roundsPlayed: 0,
     roundsWon: 0,
-    capturePayouts: 0,  // times the mid point paid out
+    capturePayouts: 0,   // how often the mid point paid out
   };
+}
 
-  function recordShot(gunKind) {
-    state.shotsFired += 1;
-  }
+export function createStats() {
+  const ledger = freshLedger();
+  const state = ledger;
 
-  function recordHit(gunKind, part, damage) {
+  const recordShot = (gunKind) => { state.shotsFired += 1; };
+
+  const recordHit = (gunKind, part, damage) => {
     state.shotsHit += 1;
     if (part === 'head') state.headshots += 1;
     state.damageDealt += damage;
-  }
+  };
 
-  function recordKill(gunKind) {
+  const recordKill = (gunKind) => {
     state.kills += 1;
     state.killsByGun[gunKind] = (state.killsByGun[gunKind] ?? 0) + 1;
     state.streak += 1;
     if (state.streak > state.bestStreak) state.bestStreak = state.streak;
-  }
+  };
 
-  function recordDamageTaken(amount) {
-    state.damageTaken += amount;
-  }
+  const recordDamageTaken = (amount) => { state.damageTaken += amount; };
 
-  function recordDeath() {
-    state.streak = 0;
-  }
+  // Death ends a streak; the streak itself grants no bonus money anywhere.
+  const recordDeath = () => { state.streak = 0; };
 
-  function recordRound(won) {
+  const recordRound = (won) => {
     state.roundsPlayed += 1;
     if (won) state.roundsWon += 1;
-  }
+  };
 
   function accuracy() {
-    return state.shotsFired === 0 ? 0 : state.shotsHit / state.shotsFired;
+    if (state.shotsFired === 0) return 0;
+    return state.shotsHit / state.shotsFired;
   }
 
   function headshotShare() {
-    return state.shotsHit === 0 ? 0 : state.headshots / state.shotsHit;
+    if (state.shotsHit === 0) return 0;
+    return state.headshots / state.shotsHit;
   }
 
-  // Builds the panel DOM inside the given container. One clear + rebuild per round
-  // end is fine: this runs once, never in the frame loop.
+  // One clear + rebuild of the ledger DOM. Runs once per round end, never per frame.
   function render(container) {
     container.innerHTML = '';
     const rows = [
@@ -83,6 +82,7 @@ export function createStats() {
       row.append(name, num);
       container.appendChild(row);
     }
+    // Weapon breakdown appears only once at least one kill has been filed.
     const kinds = Object.keys(state.killsByGun);
     if (kinds.length > 0) {
       const title = document.createElement('div');
@@ -112,9 +112,7 @@ export function createStats() {
     recordDamageTaken,
     recordDeath,
     recordRound,
-    recordCapturePayout() {
-      state.capturePayouts += 1;
-    },
+    recordCapturePayout() { state.capturePayouts += 1; },
     accuracy,
     headshotShare,
     render,

@@ -9,13 +9,15 @@ import { PALETTE } from './palette.js';
 const GRAVITY = 20;
 const THROW_SPEED = 15;
 const RADIUS = 0.09;
-const RESTITUTION = 0.42;
-const FRICTION = 0.82;
+const bounciness = 0.42;
+const dragFriction = 0.82;
 const MIN_FUSE = 0.35;     // a fully cooked can still gives you this long to move
 const MAX_FUSE = 2.6;
 const COOK_RATE = 1.0;     // seconds of fuse burned per second of held G
-const ARC_STEPS = 18;
-const ARC_TIME = 1.0;
+const PREDICT_STEPS = 18;
+const BURN_TIME = 1.0;
+// The lob is what makes a can clear the mid-lane rail instead of dying against it.
+const LOFT = 3.6;
 
 export function createGrenades(scene, colliders) {
   const pool = [];
@@ -23,37 +25,37 @@ export function createGrenades(scene, colliders) {
   const material = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.5, metalness: 0.2 });
   const geometry = new THREE.SphereGeometry(RADIUS, 10, 8);
 
-  // The predicted flight: one shared line whose points are rewritten each frame while
-  // the throw is charged. It is the only new geometry the system allocates.
-  const arcPositions = new Float32Array(ARC_STEPS * 3);
+  // The predicted flight: one shared dashed line whose points are rewritten each
+  // frame while the throw is charged. It is the only standing extra geometry.
+  const arcPositions = new Float32Array(PREDICT_STEPS * 3);
   const arcGeometry = new THREE.BufferGeometry();
   arcGeometry.setAttribute('position', new THREE.BufferAttribute(arcPositions, 3));
-  const arcLine = new THREE.Line(arcGeometry, new THREE.LineDashedMaterial({
+  const canLine = new THREE.Line(arcGeometry, new THREE.LineDashedMaterial({
     color: new THREE.Color(PALETTE.ink), transparent: true, opacity: 0.5, dashSize: 0.22, gapSize: 0.14,
   }));
-  arcLine.visible = false;
-  arcLine.frustumCulled = false;
-  scene.add(arcLine);
+  canLine.visible = false;
+  canLine.frustumCulled = false;
+  scene.add(canLine);
 
   function acquire() {
-    let item = pool.pop();
-    if (!item) {
-      item = {
+    let canister = pool.pop();
+    if (!canister) {
+      canister = {
         mesh: new THREE.Mesh(geometry, material),
         velocity: new THREE.Vector3(),
         position: new THREE.Vector3(),
         fuse: 0,
         live: false,
       };
-      item.mesh.castShadow = true;
-      scene.add(item.mesh);
+      canister.mesh.castShadow = true;
+      scene.add(canister.mesh);
     }
-    item.mesh.visible = true;
-    item.live = true;
-    return item;
+    canister.mesh.visible = true;
+    canister.live = true;
+    return canister;
   }
 
-  // First box whose bounds contain the point, or null. One pass, no allocation.
+  // First box whose bounds contain the point (padded by the can's radius), or null.
   function boxAt(x, y, z, pad) {
     for (let index = 0; index < colliders.length; index += 1) {
       const box = colliders[index];
@@ -65,93 +67,91 @@ export function createGrenades(scene, colliders) {
   }
 
   function throwGrenade(origin, direction, speed = THROW_SPEED, cook = 0) {
-    const item = acquire();
-    item.position.copy(origin);
-    item.velocity.copy(direction).normalize().multiplyScalar(speed);
-    // The lob is what makes a can clear the mid-lane rail instead of dying against it.
-    item.velocity.y += 3.6;
-    item.fuse = Math.max(MIN_FUSE, MAX_FUSE - cook);
-    item.mesh.position.copy(item.position);
-    active.push(item);
-    return item;
+    const canister = acquire();
+    canister.position.copy(origin);
+    canister.velocity.copy(direction).normalize().multiplyScalar(speed);
+    canister.velocity.y += LOFT;
+    canister.fuse = Math.max(MIN_FUSE, MAX_FUSE - cook);
+    canister.mesh.position.copy(canister.position);
+    active.push(canister);
+    return canister;
   }
 
-  // Predicts the arc for the indicator by integrating the same gravity the sim uses,
-  // stopping the preview at the first surface it would strike.
+  // Integrates the same gravity the sim uses and stops the preview at the first
+  // surface it would strike, so the line never reads as running through a wall.
   function previewArc(origin, direction, speed = THROW_SPEED) {
     let x = origin.x;
     let y = origin.y;
     let z = origin.z;
     const vx = direction.x * speed;
-    const vy = direction.y * speed + 3.6;
+    const vy = direction.y * speed + LOFT;
     const vz = direction.z * speed;
-    const dt = ARC_TIME / ARC_STEPS;
+    const dt = BURN_TIME / PREDICT_STEPS;
     let stopped = false;
-    for (let step = 0; step < ARC_STEPS; step += 1) {
+    for (let step = 0; step < PREDICT_STEPS; step += 1) {
       const t = (step + 1) * dt;
       const px = x + vx * t;
       const py = y + vy * t - 0.5 * GRAVITY * t * t;
       const pz = z + vz * t;
       if (!stopped && (py < RADIUS || boxAt(px, py, pz, RADIUS))) stopped = true;
-      // Once the arc strikes, the remaining points collapse onto the hit so the line
-      // reads as a stub that ends there rather than a line running through a wall.
+      // After impact, every later point collapses onto the hit point.
       arcPositions[step * 3] = stopped ? x : px;
       arcPositions[step * 3 + 1] = stopped ? y : py;
       arcPositions[step * 3 + 2] = stopped ? z : pz;
       if (!stopped) { x = px; y = py; z = pz; }
     }
     arcGeometry.attributes.position.needsUpdate = true;
-    arcLine.computeLineDistances();
-    arcLine.visible = true;
+    canLine.computeLineDistances();
+    canLine.visible = true;
   }
 
   function hideArc() {
-    arcLine.visible = false;
+    canLine.visible = false;
   }
 
+  // Axis-separated sweep: move x, test, then z, then y. Each axis that ends up inside
+  // a box is undone and reflected, which is what makes a corner bounce send the can
+  // back out of the corner instead of through it.
   function step(dt, onBlast) {
     for (let index = active.length - 1; index >= 0; index -= 1) {
-      const item = active[index];
-      item.fuse -= dt;
-      if (item.fuse <= 0) {
-        item.mesh.visible = false;
-        item.live = false;
+      const canister = active[index];
+      canister.fuse -= dt;
+      if (canister.fuse <= 0) {
+        canister.mesh.visible = false;
+        canister.live = false;
         active.splice(index, 1);
-        pool.push(item);
-        onBlast(item.position);
+        pool.push(canister);
+        onBlast(canister.position);
         continue;
       }
-      const p = item.position;
-      item.velocity.y -= GRAVITY * dt;
-      // Axis-separated sweep: move x, test, then z, then y. Each axis that ends up
-      // inside a box is undone and reflected, which is what makes a corner bounce
-      // send the can back out of the corner instead of through it.
-      const nextX = p.x + item.velocity.x * dt;
-      if (boxAt(nextX, p.y, p.z, RADIUS)) item.velocity.x *= -RESTITUTION;
+      const p = canister.position;
+      canister.velocity.y -= GRAVITY * dt;
+      const nextX = p.x + canister.velocity.x * dt;
+      if (boxAt(nextX, p.y, p.z, RADIUS)) canister.velocity.x *= -bounciness;
       else p.x = nextX;
-      const nextZ = p.z + item.velocity.z * dt;
-      if (boxAt(p.x, p.y, nextZ, RADIUS)) item.velocity.z *= -RESTITUTION;
+      const nextZ = p.z + canister.velocity.z * dt;
+      if (boxAt(p.x, p.y, nextZ, RADIUS)) canister.velocity.z *= -bounciness;
       else p.z = nextZ;
-      const nextY = p.y + item.velocity.y * dt;
+      const nextY = p.y + canister.velocity.y * dt;
       if (boxAt(p.x, nextY, p.z, RADIUS)) {
-        item.velocity.y *= -RESTITUTION;
-        item.velocity.x *= FRICTION;
-        item.velocity.z *= FRICTION;
+        canister.velocity.y *= -bounciness;
+        canister.velocity.x *= dragFriction;
+        canister.velocity.z *= dragFriction;
       } else {
         p.y = nextY;
       }
       if (p.y < RADIUS) {
         p.y = RADIUS;
-        item.velocity.y = Math.abs(item.velocity.y) * RESTITUTION;
-        if (item.velocity.y < 1.0) item.velocity.y = 0;
-        item.velocity.x *= FRICTION;
-        item.velocity.z *= FRICTION;
+        canister.velocity.y = Math.abs(canister.velocity.y) * bounciness;
+        if (canister.velocity.y < 1.0) canister.velocity.y = 0;
+        canister.velocity.x *= dragFriction;
+        canister.velocity.z *= dragFriction;
       }
-      item.mesh.position.copy(p);
-      // A can that has come to rest sits level instead of rolling: a bounce cycle of
-      // less than 0.5 m/s is below what the wall test can resolve cleanly.
-      if (item.velocity.lengthSq() < 0.25 && p.y <= RADIUS + 0.01) {
-        item.velocity.set(0, 0, 0);
+      canister.mesh.position.copy(p);
+      // A can that has come to rest sits level instead of rolling: below ~0.5 m/s
+      // the wall test cannot resolve a clean bounce cycle.
+      if (canister.velocity.lengthSq() < 0.25 && p.y <= RADIUS + 0.01) {
+        canister.velocity.set(0, 0, 0);
       }
     }
   }
