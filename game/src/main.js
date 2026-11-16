@@ -23,6 +23,7 @@ import { createSpotting } from './spotting.js';
 import { registerExtraGuns, pelletDirections, rangeScale, createRecoilModel, extraBuyItems, gunDetail } from './weapons2.js';
 import { createGrenades as createGrenadesV2 } from './grenades2.js';
 import { createMinimap } from './minimap.js';
+import { init as initRadar } from './radar.js';
 import { createParticles } from './particles.js';
 import { createAnnouncer } from './announce.js';
 import { hasLineOfSight } from './physics.js';
@@ -76,7 +77,11 @@ combat.setWorld(world.colliders);
 const weapon = createWeapon(camera);
 const hud = createHud();
 const player = createPlayer(world.colliders);
-const input = createInput(renderer.domElement, onLockChange);
+const input = createInput(renderer.domElement, onLockChange, () => {
+  // 'R' flips the radar overlay; the toggle returns the new visibility for the banner.
+  const shown = radar.toggle();
+  announcer.info(shown ? 'Radar on.' : 'Radar off.');
+});
 const device = createDevice(scene);
 const grenades = createGrenades(scene, world.colliders);
 const grenades2 = createGrenadesV2(scene, world.colliders);
@@ -238,6 +243,11 @@ const bots = createBots(scene, world.colliders, combat, random, {
     bot.holdTimer = Math.max(bot.holdTimer, 1.2);
   },
 });
+
+// The radar is the tactical dish overlay; it needs the camera for heading and the
+// live bot list for blips. bots.bots is mutated in place, so the radar reads the
+// same array the simulation steps each frame.
+const radar = initRadar(document.getElementById('radar-slot'), scene, camera, bots.bots);
 
 const rounds = createRounds({
   onRoundBegin(s) {

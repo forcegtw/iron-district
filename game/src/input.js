@@ -1,7 +1,7 @@
 // Keyboard and mouse, and the pointer lock that turns the mouse into look. Plain browser
 // APIs only: the game asks the canvas for pointer lock and reads movementX/Y while it
 // holds it. No AudioContext here or anywhere in shot mode.
-export function createInput(canvas, onLockChange) {
+export function createInput(canvas, onLockChange, onRadarToggle) {
   const keys = new Set();
   const state = { keys, locked: false, firing: false, lookX: 0, lookY: 0 };
   let pressEdge = false;
@@ -10,6 +10,9 @@ export function createInput(canvas, onLockChange) {
     if (down) keys.add(event.code);
     else keys.delete(event.code);
     if (event.code === 'Space') event.preventDefault();
+    // 'R' toggles the radar overlay on the keydown edge only, so holding it
+    // doesn't flicker the overlay on and off.
+    if (down && event.code === 'KeyR' && !event.repeat && onRadarToggle) onRadarToggle();
   }
 
   window.addEventListener('keydown', (event) => setKey(event, true));
