@@ -3,25 +3,25 @@
 // in recoil that walks. Both register into the shared GUNS table so the buy menu,
 // the bot loadouts and the single hitscan path see them without special cases.
 //
-// Balance notes are kept next to the numbers: every value here was picked against a
+// Balance notes sit next to the numbers: every value here was picked against a
 // 100 HP body and a 0.4 s human reaction, so a duel has a winner before it drags.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
-export const EXTRA_GUNS = {
+export const extraGuns = {
   shotgun: {
     name: 'Breaker 12',
     // 8 pellets x 13 = 104 at the muzzle: a clean one-shot only if the whole cone
-    // lands on the chest inside 5 m, which is exactly the range a defender gives up
-    // map control to hold.
+    // lands on the chest inside 5 m, exactly the range a defender gives up map
+    // control to hold.
     damage: 13,
-    headMult: 2.0,      // a head hit with every pellet is 208: lethal, but rare
+    headMult: 2.0,      // every pellet in the head is 208: lethal, but rare
     pellets: 8,
     cone: 0.085,        // radians of half-angle: 0.9 m wide at 10 m, wider than a torso
     falloffNear: 6,     // full damage inside this range
-    falloffFar: 26,     // and 35% of it beyond, so a lane shot is a warning not a kill
+    falloffFar: 26,     // and 35% of it beyond, so a lane shot warns instead of killing
     falloffFloor: 0.35,
-    fireGap: 0.78,      // pump cycle: you cannot spam it, so the first shot must count
+    fireGap: 0.78,      // pump cycle: no spam, so the first shot has to count
     mag: 6,
     reserve: 24,
     reloadTime: 2.7,
@@ -35,9 +35,9 @@ export const EXTRA_GUNS = {
   },
   cinder: {
     name: 'Cinder 9',
-    // 15 damage at 0.052 s apart: 7 rounds (0.36 s) to drop a body, versus the
-    // carbine's 4 (0.32 s). Cheaper and faster, but weaker per trigger pull — the
-    // eco answer to losing a round, not a replacement for the rifle.
+    // 15 damage every 0.052 s: seven rounds (0.36 s) to drop a body versus the
+    // carbine's four (0.32 s). Cheaper and faster but weaker per pull — the eco
+    // answer to a lost round, not a replacement for the rifle.
     damage: 15,
     headMult: 2.4,
     pellets: 1,
@@ -58,13 +58,13 @@ export const EXTRA_GUNS = {
 // Registers the two guns into the shared table in place. Called once at boot, before
 // any model is built or any price is read, so nothing else needs to know they are new.
 export function registerExtraGuns(guns) {
-  for (const kind of Object.keys(EXTRA_GUNS)) {
-    if (!guns[kind]) guns[kind] = EXTRA_GUNS[kind];
+  for (const kind of Object.keys(extraGuns)) {
+    if (!guns[kind]) guns[kind] = extraGuns[kind];
   }
   return guns;
 }
 
-// Damage multiplier for range: flat inside falloffNear, linear to the floor at
+// Range multiplier on damage: flat inside falloffNear, linear down to the floor at
 // falloffFar. Guns without falloff data return 1 (rifle, SMG, pistol, DMR).
 export function rangeScale(gun, distance) {
   if (!gun.falloffNear) return 1;
@@ -75,10 +75,9 @@ export function rangeScale(gun, distance) {
 }
 
 // Scatter directions for one trigger pull, written into a caller-owned array of
-// vectors so no Vector3 is allocated while firing. A cone is sampled with a square
-// root on the radius, which spreads pellets evenly across the disc rather than
-// bunching them in the middle.
-export function pelletDirections(gun, direction, random, out) {
+// vectors so no Vector3 is allocated while firing. The radius is sampled with a
+// square root so pellets spread evenly across the disc instead of bunching mid-cone.
+export function spreadCone(gun, direction, random, out) {
   const count = gun.pellets ?? 1;
   for (let index = 0; index < count; index += 1) {
     const target = out[index] ?? (out[index] = new THREE.Vector3());
@@ -94,25 +93,25 @@ export function pelletDirections(gun, direction, random, out) {
   return count;
 }
 
-// View recoil as a small state machine: kick on the shot, climb on sustained fire,
-// then walk the view back when the trigger is released. The player module only knows
-// how to add a delta, so the walk-back is applied here as negative deltas over time.
-export function createRecoilModel() {
+// View recoil as a small state machine: kick on the shot, climb while the trigger is
+// held, then walk the view back after release. player.js only knows how to add a
+// delta, so the walk-back arrives here as negative deltas spread over time.
+export function recoilWalk() {
   let climb = 0;        // 0..1, how deep into a burst the trigger is
   let debtPitch = 0;    // accumulated kick not yet walked out
   let debtYaw = 0;
 
   function shot(gun, random) {
     climb = Math.min(1, climb + 0.22);
-    // The multiplier stops at 1.55x: a spray climbs, it never becomes unaimable.
+    // The multiplier caps at 1.55x: a spray climbs, it never becomes unaimable.
     const scale = 1 + climb * 0.55;
     debtPitch += gun.recoil * scale;
     debtYaw += (random() * 2 - 1) * gun.recoil * 0.35;
     return { pitch: gun.recoil * scale, yaw: (random() * 2 - 1) * gun.recoil * 0.35 };
   }
 
-  // Called every fixed step from the simulation. Returns the delta to apply to the
-  // view, and is zero while the trigger is down so spraying still climbs.
+  // Called every fixed step. Returns the delta to add to the view, and is zero while
+  // the trigger is down so spraying still climbs.
   function step(dt, gun, firing) {
     climb = Math.max(0, climb - dt * 1.7);
     if (firing || !gun) return { pitch: 0, yaw: 0 };
@@ -131,10 +130,10 @@ export function createRecoilModel() {
   };
 }
 
-// The two view models. Shaped from the same three materials the other guns use so the
-// armoury reads as one kit: a wide bore and a tube magazine for the shotgun, a stubby
-// receiver with a tall magazine for the SMG.
-export function buildExtraModel(kind, materials) {
+// The two view models, shaped from the same three materials the other guns use: a wide
+// bore and a tube magazine for the shotgun, a stubby receiver with a tall magazine for
+// the SMG.
+export function extraModel(kind, materials) {
   if (kind !== 'shotgun' && kind !== 'cinder') return null;
   const model = new THREE.Group();
   if (kind === 'shotgun') {
@@ -166,16 +165,16 @@ export function buildExtraModel(kind, materials) {
   return model;
 }
 
-// Buy-menu rows for the two new guns, in the shape the HUD's catalog already takes.
+// Buy-menu rows for the two new guns, in the shape the HUD catalog already takes.
 export function extraBuyItems() {
   return [
-    { kind: 'shotgun', name: EXTRA_GUNS.shotgun.name, price: EXTRA_GUNS.shotgun.price },
-    { kind: 'cinder', name: EXTRA_GUNS.cinder.name, price: EXTRA_GUNS.cinder.price },
+    { kind: 'shotgun', name: extraGuns.shotgun.name, price: extraGuns.shotgun.price },
+    { kind: 'cinder', name: extraGuns.cinder.name, price: extraGuns.cinder.price },
   ];
 }
 
 // Detail lines for the T panel: the numbers a player actually compares, kept short
-// enough to read mid-buy-phase rather than a stat sheet.
+// enough to read during a buy phase rather than a full stat sheet.
 export function gunDetail(kind, gun) {
   const rpm = Math.round(60 / gun.fireGap);
   const lines = [
@@ -190,6 +189,6 @@ export function gunDetail(kind, gun) {
   return { kind, name: gun.name, lines };
 }
 
-// The palette is imported for the model materials' shared tone; referenced here so a
-// bundler cannot tree-shake a module the view models depend on.
+// The palette is imported for the shared tone of the model materials; referenced here
+// so a bundler cannot tree-shake a module the view models depend on.
 export const ACCENT = PALETTE.accent;

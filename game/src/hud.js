@@ -1,7 +1,7 @@
 // The DOM HUD: crosshair, hit marker, health, ammo, grenades, round timer, team scores,
 // money, the buy menu, damage flash and the overlay panel. It never touches the
-// simulation; main.js pushes numbers in and reads events out. Text updates are cached
-// against the last value so the DOM is written only when a number actually changes.
+// simulation; main.js pushes numbers in and reads events out. Text writes are cached
+// against the last value so the DOM is only touched when a number really changes.
 const COPY = {
   start: {
     title: 'Iron District',
@@ -24,6 +24,10 @@ const COPY = {
     action: 'Next round',
   },
 };
+
+function overlayText(mode) {
+  return COPY[mode];
+}
 
 export function createHud() {
   const overlay = document.getElementById('overlay');
@@ -52,6 +56,7 @@ export function createHud() {
   const damageFlash = document.getElementById('damage-flash');
   const grenadeCount = document.getElementById('grenade-count');
   const objective = document.getElementById('objective');
+
   let hitTimer = 0;
   let lastMag = -1;
   let lastReserve = -1;
@@ -64,6 +69,8 @@ export function createHud() {
   let onBuyPick = null;
   let onBuyClose = null;
 
+  // Rebuilds the buy list: one button per catalog row plus the close action. A row
+  // is disabled when it is already owned or costs more than the purse.
   function renderBuy(items, money) {
     buyMoney.textContent = `$${money}`;
     buyList.innerHTML = '';
@@ -88,7 +95,8 @@ export function createHud() {
   }
 
   return {
-    // Fills the end-of-round stats ledger from the stats module's own renderer.
+    // Fills the end-of-round ledger from the stats module's own renderer, then hides
+    // the panel again six seconds later.
     renderStats(stats) {
       if (!statsPanel || !statsGrid) return;
       stats.render(statsGrid);
@@ -96,7 +104,7 @@ export function createHud() {
       clearTimeout(statsPanel._t);
       statsPanel._t = setTimeout(() => { statsPanel.hidden = true; }, 6000);
     },
-    // T panel: one card per gun with its numbers, or nothing when closed.
+    // T panel: one card per gun with its numbers, or nothing at all when closed.
     toggleDetail(cards) {
       if (!detailPanel || !detailGrid) return;
       if (!cards) {
@@ -184,6 +192,7 @@ export function createHud() {
       clearTimeout(damageFlash._t);
       damageFlash._t = setTimeout(() => damageFlash.classList.remove('on'), 130);
     },
+    // A kill marker is the same cross tilted further out and scaled up a touch.
     hitMarker(killed, holdMs = 90) {
       hitmarker.classList.add('on');
       hitmarker.style.transform = killed ? 'translate(-50%, -50%) rotate(45deg) scale(1.25)' : '';
@@ -198,6 +207,7 @@ export function createHud() {
       buyMenu.hidden = false;
       renderBuy(items, money);
     },
+    // Called after a purchase so prices and owned flags refresh in place.
     refreshBuy(items, money) {
       if (buyOpen) renderBuy(items, money);
     },
@@ -209,9 +219,13 @@ export function createHud() {
     onBuyPick(handler) { onBuyPick = handler; },
     onBuyClose(handler) { onBuyClose = handler; },
     showOverlay(mode, score) {
-      const text = COPY[mode];
+      const text = overlayText(mode);
       title.textContent = text.title;
-      copy.textContent = mode === 'won' || mode === 'lost' ? `${text.copy} ${reasonLine(score)}` : text.copy;
+      const base = text.copy;
+      // Round-end panels append the round's reason to the base copy when there is one.
+      copy.textContent = mode === 'won' || mode === 'lost'
+        ? `${base} ${score && score.reason ? score.reason : ''}`
+        : base;
       play.textContent = text.action;
       overlay.hidden = false;
       play.focus();
@@ -223,8 +237,4 @@ export function createHud() {
       play.addEventListener('click', handler);
     },
   };
-}
-
-function reasonLine(score) {
-  return score && score.reason ? score.reason : '';
 }

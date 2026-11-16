@@ -11,6 +11,7 @@ import { CAPTURE_SPOT } from './objectives.js';
 
 const SIZE = 220;              // canvas is square, the dish is the inscribed circle
 const RANGE = 22;              // metres from the player drawn edge to edge
+const MAX_BLIP_AGE_MS = 1600;  // blips fade out if the sweep hasn't refreshed them
 const C = SIZE / 2;            // centre of the dish, where the player always sits
 const PX = (C - 6) / RANGE;    // pixels per metre, leaving a rim margin
 const RIM_COLOUR = '#3f4c55';

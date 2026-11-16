@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Iron District: a round-based tactical FPS</title>
 <style>
-  /* Look plan: canvas, surface, hairline, ink, muted and one accent. Every colour below
-     is one of the six in palette.js, so the whole game shares one palette. */
+  /* Look plan: canvas, surface, hairline, ink, muted and one accent. All of it is the
+     six-colour palette in palette.js, so the whole game reads as one kit. */
   :root {
     --canvas: #101315;
     --surface: #1c2429;
@@ -31,6 +31,7 @@
   #game, #game canvas { position: fixed; inset: 0; display: block; }
   #hud { position: fixed; inset: 0; pointer-events: none; }
 
+  /* Crosshair: four hairline ticks around an empty centre. */
   #crosshair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); }
   #crosshair i { position: absolute; background: var(--ink); opacity: .85; }
   #crosshair i:nth-child(1) { left: 10px; top: 0; width: 2px; height: 7px; }
@@ -38,6 +39,7 @@
   #crosshair i:nth-child(3) { top: 10px; left: 0; height: 2px; width: 7px; }
   #crosshair i:nth-child(4) { top: 10px; right: 0; height: 2px; width: 7px; }
 
+  /* Hit marker: a rotated copy of the crosshair in accent; kills scale it up. */
   #hitmarker { position: fixed; left: 50%; top: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; transition: opacity 90ms linear; }
   #hitmarker.on { opacity: 1; }
   #hitmarker i { position: absolute; background: var(--accent); }
@@ -46,6 +48,7 @@
   #hitmarker i:nth-child(3) { top: 12px; left: 0; height: 2px; width: 8px; }
   #hitmarker i:nth-child(4) { top: 12px; right: 0; height: 2px; width: 8px; }
 
+  /* Damage flash: an accent vignette, only shown for a tenth of a second per hit. */
   #damage-flash {
     position: fixed; inset: 0;
     background: radial-gradient(ellipse at center, transparent 55%, color-mix(in srgb, var(--accent) 45%, transparent));
@@ -190,7 +193,8 @@
   }
   .announcer.announcer-on { opacity: 1; }
 
-  /* Minimap: a square canvas in the top-right, clear of the objective text. */
+  /* Minimap: a square canvas in the top-right, clear of the objective text.
+     The radar dish sits below it with the same right edge. */
   #minimap-slot { position: fixed; right: 32px; top: 20px; line-height: 0; }
   #radar-slot { position: fixed; right: 32px; top: 212px; line-height: 0; }
   #minimap {
