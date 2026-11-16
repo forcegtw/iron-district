@@ -1,3 +1,5 @@
+[![make.fun](https://make.fun/badge/threejs-fps-02.svg)](https://make.fun/c/threejs-fps-02)
+
 # Iron District
 
 A round-based tactical FPS built with three.js for the [make.fun](https://make.fun) bounty *Make the best three.js tactical FPS* ([threejs-fps-02](https://make.fun/c/threejs-fps-02)).
