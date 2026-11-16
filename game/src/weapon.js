@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { GUNS } from './combat.js';
+import { buildExtraModel } from './weapons2.js';
 
 const MUZZLE_TIME = 0.06;
 
@@ -14,6 +15,12 @@ export function createWeapon(camera) {
 
   const models = new Map();
   function buildModel(kind) {
+    const extra = buildExtraModel(kind, { metal, grip, accent });
+    if (extra) {
+      extra.visible = false;
+      camera.add(extra);
+      return extra;
+    }
     const model = new THREE.Group();
     if (kind === 'pistol') {
       const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.24), metal);
