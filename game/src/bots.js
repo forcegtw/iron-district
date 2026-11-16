@@ -1,27 +1,29 @@
 // The Torch squad: three bots that walk lanes, hold positions, react to what they see,
 // plant the device at the site and shoot with the same hitscan the player uses.
 // Deterministic: every random draw comes from the shared seeded generator, so a seed
-// plays out the same round every time. HOLD_TIME below is the main pressure knob:
-// shorter holds push the squad onto the objective sooner.
+// plays out the same round every time. HOLD_TIME is the main pressure knob: shorter
+// holds push the squad onto the objective sooner.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
-import { ROUTES, DEVICE_SPOT, ATTACKER_SPAWNS } from './world.js';
-import { makeBody, moveBody, horizontalSpeed } from './physics.js';
+import { ROUTES as PATHS, DEVICE_SPOT as BOMB_SPOT, ATTACKER_SPAWNS } from './world.js';
+import { makeBody, moveBody, footSpeed } from './physics.js';
 import { GUNS, GRENADE_RADIUS, GRENADE_DAMAGE } from './combat.js';
 
 const HEALTH = 100;
 const EYE_STAND = 1.6;
 const EYE_CROUCH = 1.02;
 const HEIGHT_STAND = 1.72;
-const WALK_SPEED = 3.8; // slightly brisker patrol pacing keeps bots from lagging behind the player
-const HOLD_TIME = 2.4; // trimmed so holding bots re-engage lanes a touch sooner
+const WALK_SPEED = 3.8;      // brisk patrol pacing keeps bots from lagging the player
+const HOLD_TIME = 2.4;       // trimmed so holding bots re-engage lanes sooner
 const REACTION_TIME = 0.4;
-const ACCURACY = 0.08; // aim jitter in radians, wider on the move and at range
+const ACCURACY = 0.08;       // aim jitter in radians, wider on the move and at range
 const FIRE_GAP_BOT = 0.5;
 
+// Reused vectors: nothing in the per-bot step allocates.
 const scratchEye = new THREE.Vector3();
-const scratchTarget = new THREE.Vector3();
+const scratchSeen = new THREE.Vector3();
 
+// One low-poly figure: dark torso and legs, accent-coloured head, all shadowed.
 function makeBotMesh(scene) {
   const bodyMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.ink), roughness: 0.6, metalness: 0.05 });
   const headMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.45, metalness: 0.1 });
@@ -33,7 +35,7 @@ function makeBotMesh(scene) {
   const legs = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.5, 0.28), bodyMaterial);
   legs.position.y = 0.38;
   group.add(torso, head, legs);
-  group.traverse((mesh) => { if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; } });
+  group.traverse((figure) => { if (figure.isMesh) { figure.castShadow = true; figure.receiveShadow = true; } });
   group.visible = false;
   scene.add(group);
   return { group, torso, head, legs };
@@ -43,8 +45,9 @@ export function createBots(scene, colliders, combat, random, hooks) {
   const bots = [];
   const eye = new THREE.Vector3();
 
+  // Three bots with fixed roles and lanes: the carrier plants, the others cover.
   for (let index = 0; index < 3; index += 1) {
-    const mesh = makeBotMesh(scene);
+    const figure = makeBotMesh(scene);
     const bot = {
       index,
       team: 'torch',
@@ -68,7 +71,7 @@ export function createBots(scene, colliders, combat, random, hooks) {
       burst: 0,
       target: null,
       role: index === 0 ? 'carrier' : (index === 1 ? 'support' : 'cover'),
-      mesh,
+      figure,
     };
     bot.position = bot.body.position;
     bots.push(bot);
@@ -101,7 +104,7 @@ export function createBots(scene, colliders, combat, random, hooks) {
       bot.burst = 0;
       bot.target = null;
       bot.routeStep = 0;
-      bot.mesh.group.visible = true;
+      bot.figure.group.visible = true;
     }
   }
 
@@ -110,7 +113,9 @@ export function createBots(scene, colliders, combat, random, hooks) {
     return out;
   }
 
-  function visibleEnemy(bot, enemies) {
+  // Nearest enemy the bot can plausibly see: line of sight first, then a field-of-view
+  // test that only forgives distant enemies (the fov widens while holding position).
+  function seeEnemy(bot, enemies) {
     eyeOf(bot, eye);
     let best = null;
     let bestDistance = Infinity;
@@ -118,8 +123,8 @@ export function createBots(scene, colliders, combat, random, hooks) {
       const enemy = enemies[index];
       if (!enemy.alive || enemy.team === bot.team) continue;
       const p = enemy.position;
-      scratchTarget.set(p.x, p.y + (enemy.isCrouching ? EYE_CROUCH : EYE_STAND) * 0.85, p.z);
-      if (!hooks.canSee(eye, scratchTarget)) continue;
+      scratchSeen.set(p.x, p.y + (enemy.isCrouching ? EYE_CROUCH : EYE_STAND) * 0.85, p.z);
+      if (!hooks.canSee(eye, scratchSeen)) continue;
       const dx = p.x - bot.body.position.x;
       const dz = p.z - bot.body.position.z;
       const distance = Math.hypot(dx, dz);
@@ -136,30 +141,30 @@ export function createBots(scene, colliders, combat, random, hooks) {
     return best;
   }
 
-  function botShoot(bot, enemy) {
+  // Burst discipline: two or three rounds, then a longer pause to re-aim. Jitter
+  // grows with the bot's own movement, the range and the enemy's crouch.
+  function launchBot(bot, enemy) {
     if (bot.magazine <= 0) {
       bot.reloadTimer = bot.gun.reloadTime;
       return;
     }
     if (bot.fireTimer > 0) return;
-    // Burst discipline: fire two or three, then pause to re-aim.
     bot.burst += 1;
     bot.fireTimer = (bot.burst % 3 === 0 ? FIRE_GAP_BOT * 2.6 : FIRE_GAP_BOT) + random() * 0.14;
     bot.magazine -= 1;
     eyeOf(bot, eye);
-    scratchTarget.set(
+    scratchSeen.set(
       enemy.position.x,
       enemy.position.y + (enemy.isCrouching ? EYE_CROUCH : EYE_STAND) * 0.7,
       enemy.position.z,
     );
-    combat.direction.subVectors(scratchTarget, eye).normalize();
-    // Jitter grows with the bot's own movement, the range, and the enemy's crouch.
+    combat.direction.subVectors(scratchSeen, eye).normalize();
     const range = Math.hypot(
       enemy.position.x - bot.body.position.x,
       enemy.position.z - bot.body.position.z,
     );
     const enemyCrouch = enemy.isCrouching ? 1.5 : 0;
-    const jitter = ACCURACY * (0.4 + horizontalSpeed(bot.body) / WALK_SPEED + range / 40 + enemyCrouch);
+    const jitter = ACCURACY * (0.4 + footSpeed(bot.body) / WALK_SPEED + range / 40 + enemyCrouch);
     combat.direction.x += (random() * 2 - 1) * jitter;
     combat.direction.y += (random() * 2 - 1) * jitter;
     combat.direction.z += (random() * 2 - 1) * jitter;
@@ -168,11 +173,12 @@ export function createBots(scene, colliders, combat, random, hooks) {
   }
 
   function routePoint(bot) {
-    const route = ROUTES[bot.routeName];
+    const route = PATHS[bot.routeName];
     return route[bot.routeStep % route.length];
   }
 
-  function advanceRoute(bot) {
+  // On each waypoint reached there is a chance the bot stops and holds the spot.
+  function stepLane(bot) {
     bot.routeStep += 1;
     if (random() < 0.3) {
       bot.mode = 'hold';
@@ -180,6 +186,7 @@ export function createBots(scene, colliders, combat, random, hooks) {
     }
   }
 
+  // Unit step toward a point, or null when already on it.
   function walkToward(bot, x, z) {
     const dx = x - bot.body.position.x;
     const dz = z - bot.body.position.z;
@@ -190,7 +197,7 @@ export function createBots(scene, colliders, combat, random, hooks) {
 
   function step(bot, dt, enemies, roundState) {
     if (!bot.alive) {
-      bot.mesh.group.visible = false;
+      bot.figure.group.visible = false;
       return;
     }
     bot.fireTimer = Math.max(0, bot.fireTimer - dt);
@@ -199,10 +206,13 @@ export function createBots(scene, colliders, combat, random, hooks) {
       if (bot.reloadTimer <= 0) bot.magazine = bot.gun.mag;
     }
     if (bot.reactTimer > 0) bot.reactTimer -= dt;
+    // Eye height glides between stand and crouch rather than snapping.
     const eyeTarget = bot.isCrouching ? EYE_CROUCH : EYE_STAND;
     bot.eye += (eyeTarget - bot.eye) * Math.min(1, dt * 10);
 
-    const seen = visibleEnemy(bot, enemies);
+    // Target acquisition: a new sighting costs a reaction delay scaled by range;
+    // a lost or dead target clears after a moment.
+    const seen = spotEnemy(bot, enemies);
     if (seen) {
       if (bot.target !== seen) {
         bot.target = seen;
@@ -215,9 +225,10 @@ export function createBots(scene, colliders, combat, random, hooks) {
       bot.target = null;
     }
 
-    let wishX = 0;
-    let wishZ = 0;
+    let moveVec = 0;
+    let wishStrafe = 0;
 
+    // Combat: face the enemy, crouch at long range, fire, and strafe occasionally.
     if (bot.target && bot.reactTimer <= 0) {
       const enemy = bot.target;
       bot.yaw = Math.atan2(
@@ -229,21 +240,23 @@ export function createBots(scene, colliders, combat, random, hooks) {
         enemy.position.z - bot.body.position.z,
       );
       bot.isCrouching = distance > 14;
-      botShoot(bot, enemy);
+      launchBot(bot, enemy);
       if (random() < dt * 1.2) {
-        wishX = Math.cos(bot.yaw) * (random() < 0.5 ? 1 : -1);
-        wishZ = -Math.sin(bot.yaw) * (random() < 0.5 ? 1 : -1);
+        moveVec = Math.cos(bot.yaw) * (random() < 0.5 ? 1 : -1);
+        wishStrafe = -Math.sin(bot.yaw) * (random() < 0.5 ? 1 : -1);
       }
-      moveBody(bot.body, colliders, dt, wishX, wishZ, WALK_SPEED, 20, false);
-      syncMesh(bot);
+      moveBody(bot.body, colliders, dt, moveVec, wishStrafe, WALK_SPEED, 20, false);
+      syncFigure(bot);
       return;
     }
 
     bot.isCrouching = false;
 
     if (roundState.phase === 'live') {
+      // The carrier walks to the site and plants; everyone else walks there to
+      // guard once the device is down.
       if (bot.role === 'carrier' && !roundState.devicePlanted) {
-        const site = walkToward(bot, DEVICE_SPOT[0], DEVICE_SPOT[1]);
+        const site = walkToward(bot, BOMB_SPOT[0], BOMB_SPOT[1]);
         if (site && site[2] < 1.6) {
           bot.plantTimer += dt;
           bot.mode = 'hold';
@@ -253,15 +266,14 @@ export function createBots(scene, colliders, combat, random, hooks) {
             hooks.plant(bot);
           }
         } else if (site) {
-          wishX = site[0];
-          wishZ = site[1];
+          moveVec = site[0];
+          wishStrafe = site[1];
         }
       } else if (roundState.devicePlanted) {
-        // Everyone guards the planted device.
-        const guard = walkToward(bot, DEVICE_SPOT[0], DEVICE_SPOT[1]);
+        const guard = walkToward(bot, BOMB_SPOT[0], BOMB_SPOT[1]);
         if (guard && guard[2] > 4.5) {
-          wishX = guard[0];
-          wishZ = guard[1];
+          moveVec = guard[0];
+          wishStrafe = guard[1];
         } else if (bot.mode !== 'hold') {
           bot.mode = 'hold';
           bot.holdTimer = HOLD_TIME;
@@ -269,7 +281,8 @@ export function createBots(scene, colliders, combat, random, hooks) {
       }
     }
 
-    if (wishX === 0 && wishZ === 0) {
+    // No objective pull: hold the current spot or walk the lane's waypoints.
+    if (moveVec === 0 && wishStrafe === 0) {
       if (bot.mode === 'hold') {
         bot.holdTimer -= dt;
         if (bot.holdTimer <= 0) bot.mode = 'route';
@@ -277,27 +290,28 @@ export function createBots(scene, colliders, combat, random, hooks) {
         const point = routePoint(bot);
         const move = walkToward(bot, point[0], point[1]);
         if (move) {
-          if (move[2] < 1.0) advanceRoute(bot);
+          if (move[2] < 1.0) stepLane(bot);
           else {
-            wishX = move[0];
-            wishZ = move[1];
+            moveVec = move[0];
+            wishStrafe = move[1];
           }
         } else {
-          advanceRoute(bot);
+          stepLane(bot);
         }
       }
     }
 
-    if (wishX !== 0 || wishZ !== 0) bot.yaw = Math.atan2(-wishX, -wishZ);
-    moveBody(bot.body, colliders, dt, wishX, wishZ, WALK_SPEED, 20, false);
-    syncMesh(bot);
+    if (moveVec !== 0 || wishStrafe !== 0) bot.yaw = Math.atan2(-moveVec, -wishStrafe);
+    moveBody(bot.body, colliders, dt, moveVec, wishStrafe, WALK_SPEED, 20, false);
+    syncFigure(bot);
   }
 
-  function syncMesh(bot) {
+  // Mesh follows the physics body; the torso bobs faintly while the sim runs.
+  function syncFigure(bot) {
     const p = bot.body.position;
-    bot.mesh.group.position.set(p.x, p.y, p.z);
-    bot.mesh.group.rotation.y = bot.yaw;
-    bot.mesh.torso.rotation.x = Math.sin(performance.now() * 0.008 + bot.index) * 0.05;
+    bot.figure.group.position.set(p.x, p.y, p.z);
+    bot.figure.group.rotation.y = bot.yaw;
+    bot.figure.torso.rotation.x = Math.sin(performance.now() * 0.008 + bot.index) * 0.05;
   }
 
   function damage(bot, amount, part) {
@@ -306,12 +320,13 @@ export function createBots(scene, colliders, combat, random, hooks) {
     hooks.onBotHurt(bot);
     if (bot.health <= 0) {
       bot.alive = false;
-      bot.mesh.group.visible = false;
+      bot.figure.group.visible = false;
       return true;
     }
     return false;
   }
 
+  // Linear splash: full damage at the centre, zero at the blast radius.
   function grenadeBlast(point) {
     for (const bot of bots) {
       if (!bot.alive) continue;

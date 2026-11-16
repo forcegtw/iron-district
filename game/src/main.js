@@ -6,7 +6,7 @@
 // it and sets window.__shotReady. No AudioContext anywhere, so a headless capture is clean.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
-import { createWorld, DEFENDER_SPAWNS, DEVICE_SPOT } from './world.js';
+import { createWorld, DEFENDER_SPAWNS, DEVICE_SPOT as BOMB_SPOT } from './world.js';
 import { createInput } from './input.js';
 import { createPlayer } from './player.js';
 import { createWeapon } from './weapon.js';
@@ -20,7 +20,7 @@ import { createKillcam } from './killcam.js';
 import { createStats } from './stats.js';
 import { createObjectives } from './objectives.js';
 import { createSpotting } from './spotting.js';
-import { registerExtraGuns, pelletDirections, rangeScale, createRecoilModel, extraBuyItems, gunDetail } from './weapons2.js';
+import { registerExtraGuns, spreadCone, rangeScale, recoilWalk, extraBuyItems, gunDetail } from './weapons2.js';
 import { createGrenades as createGrenadesV2 } from './grenades2.js';
 import { createMinimap } from './minimap.js';
 import { init as initRadar } from './radar.js';
@@ -32,7 +32,7 @@ const FIXED_STEP = 1 / 60;
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
-const MAX_GRENADES = 2;
+const GRENADE_CAP = 2;
 
 // The two extra guns register into the shared table before anything reads it: the
 // weapon models, the buy catalog and the bot loadouts all see them for free.
@@ -40,7 +40,7 @@ registerExtraGuns(GUNS);
 
 // Cook state for the held grenade: G pressed begins burning the fuse and drawing the
 // arc, release throws with whatever fuse is left. A tap is a full-fuse lob.
-const cook = { holding: false, burned: 0 };
+const fuseCook = { holding: false, burned: 0 };
 
 // Seeded generator for everything the simulation draws: spread jitter, bot decisions.
 // Rendering reads no random numbers, so a seed replays identically.
@@ -89,7 +89,7 @@ const particles = createParticles(scene, random);
 const announcer = createAnnouncer();
 announcer.bind(document.getElementById('announcer'));
 const minimap = createMinimap(document.getElementById('minimap-slot'));
-const recoilModel = createRecoilModel();
+const recoilModel = recoilWalk();
 const killcam = createKillcam();
 const stats = createStats();
 const spotting = createSpotting(scene);
@@ -115,7 +115,7 @@ const body = player.state;
 
 // The one hitscan target list, rebuilt in place: the player first, then the bots.
 const bodies = [body, null, null, null];
-function bodiesList() {
+function targetList() {
   for (let index = 0; index < bots.bots.length; index += 1) bodies[index + 1] = bots.bots[index];
   return bodies;
 }
@@ -124,12 +124,13 @@ const state = {
   started: false,
   frozen: false,
   buyOpen: false,
-  ownedGrenades: 0,
+  carriedGrenades: 0,
   kills: 0,
   blasted: false,
 };
 
-// One tracer pool for every gun in the game, player and bots alike.
+// One tracer pool for every gun in the game, player and bots alike: 24 reusable
+// line segments, each drawn for 50 ms before the slot goes back to the pool.
 const tracerMaterial = new THREE.LineBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0.85 });
 const tracers = [];
 const tracerActive = [];
@@ -175,13 +176,15 @@ const tracerEnd = new THREE.Vector3();
 const GUN_KIND = new Map();
 for (const kind of Object.keys(GUNS)) GUN_KIND.set(GUNS[kind], kind);
 
-// The single hitscan path for every shot in the game.
-function fireHitscan(origin, directionV, gun, shooter) {
+// The single hitscan path for every shot in the game, player or bot: trace, tracer,
+// then either body damage with the range falloff, or a dust puff on whatever the
+// round actually struck.
+function fireHitscan(origin, aimVecV, gun, shooter) {
   stats.recordShot(GUN_KIND.get(gun));
-  const hit = combat.trace(origin, directionV, 90, bodiesList(), shooter.team);
+  const hit = combat.trace(origin, aimVecV, 90, targetList(), shooter.team);
   if (hit && hit.point) spawnTracer(origin, hit.point);
   else {
-    tracerEnd.copy(origin).addScaledVector(directionV, 90);
+    tracerEnd.copy(origin).addScaledVector(aimVecV, 90);
     spawnTracer(origin, tracerEnd);
   }
   if (!hit || hit.kind !== 'body') {
@@ -224,8 +227,8 @@ const bots = createBots(scene, world.colliders, combat, random, {
   canSee(eye, target) {
     return hasLineOfSight(eye, target, world.colliders);
   },
-  fire(bot, origin, direction, gun) {
-    fireHitscan(origin, direction, gun, bot);
+  fire(bot, origin, aimVec, gun) {
+    fireHitscan(origin, aimVec, gun, bot);
   },
   plant() {
     if (rounds.state.phase !== 'live' || rounds.state.devicePlanted) return;
@@ -257,7 +260,7 @@ const rounds = createRounds({
     body.health = 100;
     body.alive = true;
     player.respawn(DEFENDER_SPAWNS[1][0], DEFENDER_SPAWNS[1][1]);
-    weapon.refillGrenades(state.ownedGrenades);
+    weapon.refillGrenades(state.carriedGrenades);
     bots.spawnAll();
     device.group.visible = false;
     state.blasted = false;
@@ -268,12 +271,12 @@ const rounds = createRounds({
     announcer.clear();
     recoilModel.reset();
     grenades2.hideArc();
-    cook.holding = false;
+    fuseCook.holding = false;
     hud.setScore(s.scores.coal, s.scores.torch);
     hud.setMoney(s.money);
     hud.setHealth(100);
     hud.setAmmo(weapon.state.mag, weapon.state.reserve);
-    hud.setGrenades(state.ownedGrenades);
+    hud.setGrenades(state.carriedGrenades);
     if (!shot) openBuy();
   },
   onLive() {
@@ -297,7 +300,8 @@ const rounds = createRounds({
   },
 });
 
-// The buy catalog, re-priced against the purse every time the menu opens.
+// The buy catalog, re-priced against the purse every time the menu opens. The two
+// extra guns were registered into GUNS at boot, so they appear here without fuss.
 const BUY_ITEMS = [
   { kind: 'cinder', name: GUNS.cinder.name, price: GUNS.cinder.price },
   { kind: 'smg', name: GUNS.smg.name, price: GUNS.smg.price },
@@ -317,10 +321,11 @@ function toggleDetail() {
     : null);
 }
 
+// Marks the owned rows against the current weapon and grenade cap before render.
 function buyCatalog() {
   for (const item of BUY_ITEMS) {
     item.owned = item.kind === 'grenade'
-      ? state.ownedGrenades >= MAX_GRENADES
+      ? state.carriedGrenades >= GRENADE_CAP
       : weapon.state.gun === item.kind;
   }
   return BUY_ITEMS;
@@ -342,13 +347,14 @@ function closeBuy() {
   }
 }
 
+// A purchase: subtract the price, equip the gun or add the grenade, refresh the menu.
 function handleBuyPick(kind) {
   if (kind === 'grenade') {
-    if (rounds.state.money >= GRENADE_PRICE && state.ownedGrenades < MAX_GRENADES) {
+    if (rounds.state.money >= GRENADE_PRICE && state.carriedGrenades < GRENADE_CAP) {
       rounds.state.money -= GRENADE_PRICE;
-      state.ownedGrenades += 1;
-      weapon.refillGrenades(state.ownedGrenades);
-      hud.setGrenades(state.ownedGrenades);
+      state.carriedGrenades += 1;
+      weapon.refillGrenades(state.carriedGrenades);
+      hud.setGrenades(state.carriedGrenades);
     }
   } else {
     const gun = GUNS[kind];
@@ -372,12 +378,15 @@ function onLockChange(locked) {
   }
 }
 
+// The camera rides the physics body: eye height while alive, a low spectate crouch
+// when down, with the body's yaw and pitch as the view angles.
 function syncCamera() {
   const eyeHeight = body.alive ? body.eye : 0.45;
   camera.position.set(body.position.x, body.position.y + eyeHeight, body.position.z);
   camera.rotation.set(body.pitch, body.yaw, 0, 'YXZ');
 }
 
+// Aim the body at a world point; used by the screenshot setups to pose the view.
 function aimAt(point) {
   const dx = point.x - body.position.x;
   const dy = point.y - (body.position.y + body.eye);
@@ -388,38 +397,38 @@ function aimAt(point) {
   syncCamera();
 }
 
-const direction = new THREE.Vector3();
-// One scratch array for pellet directions, sized once for the shotgun's cone.
-const pelletScratch = [];
+const aimVec = new THREE.Vector3();
+// One scratch array for the shotgun's pellet vectors, sized once per cone.
+const pelletPool = [];
 const muzzlePoint = new THREE.Vector3();
 
+// One trigger pull. The scatter gun samples its own pellet cone; every other gun
+// flies a single jittered line. Muzzle flash and view recoil land after the shots.
 function shoot(spread) {
   if (!weapon.takeRound()) return false;
   const gunDef = weapon.gun();
-  camera.getWorldDirection(direction);
-  // The old spread model stays for single-projectile guns; the scatter gun samples
-  // its own cone so each pellet flies its own line.
+  camera.getWorldDirection(aimVec);
   if ((gunDef.pellets ?? 1) > 1) {
-    direction.x += (random() * 2 - 1) * spread;
-    direction.y += (random() * 2 - 1) * spread;
-    direction.z += (random() * 2 - 1) * spread;
-    direction.normalize();
-    const count = pelletDirections(gunDef, direction, random, pelletScratch);
+    aimVec.x += (random() * 2 - 1) * spread;
+    aimVec.y += (random() * 2 - 1) * spread;
+    aimVec.z += (random() * 2 - 1) * spread;
+    aimVec.normalize();
+    const count = spreadCone(gunDef, aimVec, random, pelletPool);
     scene.updateMatrixWorld(true);
-    muzzlePoint.copy(camera.position).addScaledVector(direction, 0.7);
+    muzzlePoint.copy(camera.position).addScaledVector(aimVec, 0.7);
     particles.muzzleAt(muzzlePoint);
     for (let index = 0; index < count; index += 1) {
-      fireHitscan(camera.position, pelletScratch[index], gunDef, body);
+      fireHitscan(camera.position, pelletPool[index], gunDef, body);
     }
   } else {
-    direction.x += (random() * 2 - 1) * spread;
-    direction.y += (random() * 2 - 1) * spread;
-    direction.z += (random() * 2 - 1) * spread;
-    direction.normalize();
+    aimVec.x += (random() * 2 - 1) * spread;
+    aimVec.y += (random() * 2 - 1) * spread;
+    aimVec.z += (random() * 2 - 1) * spread;
+    aimVec.normalize();
     scene.updateMatrixWorld(true);
-    muzzlePoint.copy(camera.position).addScaledVector(direction, 0.7);
+    muzzlePoint.copy(camera.position).addScaledVector(aimVec, 0.7);
     particles.muzzleAt(muzzlePoint);
-    fireHitscan(camera.position, direction, gunDef, body);
+    fireHitscan(camera.position, aimVec, gunDef, body);
   }
   weapon.pullTrigger();
   const kick = recoilModel.shot(gunDef, random);
@@ -428,7 +437,8 @@ function shoot(spread) {
   return true;
 }
 
-// Grenade splash against the player's side; the bots' splash lives in bots.js.
+// Grenade splash against the player's side; the bots' splash lives in bots.js. A
+// blast that downs the player is attributed to the nearest live bot for the killcam.
 const blastPoint = new THREE.Vector3();
 function blastAt(point) {
   blastPoint.copy(point);
@@ -444,7 +454,6 @@ function blastAt(point) {
     if (body.health <= 0 && body.alive) {
       body.alive = false;
       stats.recordDeath();
-      // Attribute the blast to the nearest live bot so the killcam has a subject.
       let nearest = null;
       let nearestDistance = Infinity;
       for (const bot of bots.bots) {
@@ -456,6 +465,7 @@ function blastAt(point) {
     }
   }
   bots.grenadeBlast(blastPoint);
+  // A handful of short tracers sells the blast without a particle system.
   for (let index = 0; index < 6; index += 1) {
     spawnTracer(point, {
       x: point.x + (random() * 2 - 1) * 2.2,
@@ -474,8 +484,8 @@ function stepDefuse(dt) {
     if (s.devicePlanted && s.phase === 'live') hud.setObjective('Defuse the device: hold E at the site.');
     return;
   }
-  const dx = body.position.x - DEVICE_SPOT[0];
-  const dz = body.position.z - DEVICE_SPOT[1];
+  const dx = body.position.x - BOMB_SPOT[0];
+  const dz = body.position.z - BOMB_SPOT[1];
   const inReach = Math.hypot(dx, dz) < 1.8 && input.state.keys.has('KeyE');
   if (!inReach) {
     s.defuseProgress = 0;
@@ -486,34 +496,34 @@ function stepDefuse(dt) {
   hud.setObjective(`Defusing: ${Math.round((s.defuseProgress / rounds.constants.DEFUSE_TIME) * 100)}%`);
 }
 
-// Grenade throw with cook: pressing G starts the burn and draws the arc, releasing
+// Grenade throw with fuseCook: pressing G starts the burn and draws the arc, releasing
 // throws with the remaining fuse. The whole flow lives in the frame update because
 // it is input-shaped; the simulation only sees the thrown can.
 function stepGrenadeThrow() {
   const holding = input.state.keys.has('KeyG') && weapon.state.grenades > 0;
-  if (holding && !cook.holding) {
-    cook.holding = true;
-    cook.burned = 0;
+  if (holding && !fuseCook.holding) {
+    fuseCook.holding = true;
+    fuseCook.burned = 0;
   }
-  if (cook.holding) {
+  if (fuseCook.holding) {
     if (holding) {
-      cook.burned += FIXED_STEP;
-      camera.getWorldDirection(direction);
-      grenades2.previewArc(camera.position, direction, grenades2.constants.THROW_SPEED);
+      fuseCook.burned += FIXED_STEP;
+      camera.getWorldDirection(aimVec);
+      grenades2.previewArc(camera.position, aimVec, grenades2.constants.THROW_SPEED);
     } else {
-      cook.holding = false;
+      fuseCook.holding = false;
       grenades2.hideArc();
       weapon.state.grenades -= 1;
-      state.ownedGrenades = weapon.state.grenades;
+      state.carriedGrenades = weapon.state.grenades;
       hud.setGrenades(weapon.state.grenades);
-      camera.getWorldDirection(direction);
-      grenades2.throwGrenade(camera.position, direction, grenades2.constants.THROW_SPEED, cook.burned);
+      camera.getWorldDirection(aimVec);
+      grenades2.throwGrenade(camera.position, aimVec, grenades2.constants.THROW_SPEED, fuseCook.burned);
     }
   }
 }
 
 function step(dt) {
-  elapsed += dt;
+  uptime += dt;
   rounds.step(dt, {
     player: body.alive,
     torch: bots.aliveCount(),
@@ -525,13 +535,13 @@ function step(dt) {
     stepDefuse(dt);
     weapon.step(dt);
     stepGrenadeThrow();
-    const targets = bodiesList();
+    const targets = targetList();
     for (let index = 0; index < bots.bots.length; index += 1) {
       bots.step(bots.bots[index], dt, targets, rounds.state);
     }
     grenades.step(dt, blastAt);
     grenades2.step(dt, blastAt);
-    device.step(elapsed, rounds.state.devicePlanted);
+    device.step(uptime, rounds.state.devicePlanted);
     objectives.step(dt, body, bots.bots, rounds.state);
     spotting.step(dt, body, bots.bots, (from, to) => hasLineOfSight(from, to, world.colliders), input.state.keys, rounds.state);
     particles.step(dt);
@@ -562,13 +572,14 @@ function step(dt) {
   if (rounds.state.phase === 'over' && rounds.state.reason === 'The device detonated' && !state.blasted) {
     state.blasted = true;
     device.group.visible = false;
-    blastAt({ x: DEVICE_SPOT[0], y: 0.5, z: DEVICE_SPOT[1] });
+    blastAt({ x: BOMB_SPOT[0], y: 0.5, z: BOMB_SPOT[1] });
   }
   stepTracers(dt);
 }
 
+// A kill marker stays pinned on screen in shot mode so captures always show one.
 const markerHoldMs = shot ? 4000 : 90;
-let elapsed = 0;
+let uptime = 0;
 let accumulator = 0;
 let lastTime = performance.now();
 
@@ -603,13 +614,15 @@ function frame(now) {
     const look = input.takeLook();
     player.look(look.x, look.y);
     if (input.state.keys.has('KeyR')) weapon.reload();
+    // Quick-tap grenade: a G press consumed here is the legacy full-fuse lob;
+    // a held G is picked up by the fuseCook path in the fixed step instead.
     if (input.state.keys.has('KeyG') && weapon.state.grenades > 0 && !weapon.pulling()) {
       input.state.keys.delete('KeyG');
       weapon.state.grenades -= 1;
-      state.ownedGrenades = weapon.state.grenades;
+      state.carriedGrenades = weapon.state.grenades;
       hud.setGrenades(weapon.state.grenades);
-      camera.getWorldDirection(direction);
-      grenades.throwGrenade(camera.position, direction, 13);
+      camera.getWorldDirection(aimVec);
+      grenades.throwGrenade(camera.position, aimVec, 13);
     }
     if (rounds.state.phase === 'live' && body.alive && input.state.firing && !state.buyOpen) {
       const semi = !weapon.gun().auto;
@@ -630,6 +643,8 @@ function frame(now) {
   renderer.render(scene, camera);
 }
 
+// Advances the simulation a fixed number of steps with no rendering: how the
+// screenshot setups reach a settled pose deterministically.
 function settle(steps) {
   for (let index = 0; index < steps; index += 1) step(FIXED_STEP);
 }
@@ -642,7 +657,7 @@ function runShot(name) {
   hud.hideOverlay();
   body.pitch = 0;
   body.yaw = 0;
-  state.ownedGrenades = 1;
+  state.carriedGrenades = 1;
   rounds.state.money = 2700;
   weapon.equip('rifle');
   weapon.refillGrenades(1);
@@ -722,6 +737,9 @@ function runShot(name) {
   paintTwiceThenReady();
 }
 
+// Paint the settled frame twice, then freeze the loop and flag the capture ready:
+// two rAF passes let shadows and post state settle before the pixel grab. A spinning
+// rAF after that would burn the capture's virtual-time budget, so it stops.
 function paintTwiceThenReady() {
   let painted = 0;
   function paint() {
@@ -731,8 +749,7 @@ function paintTwiceThenReady() {
     if (painted === 2) {
       window.__shotReady = true;
       state.frozen = true;
-      return; // Stop the loop: nothing else needs a frame, and a spinning
-              // rAF would burn the capture's virtual-time budget.
+      return;
     }
     requestAnimationFrame(paint);
   }
