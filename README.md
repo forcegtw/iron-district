@@ -1,4 +1,4 @@
-[![make.fun](https://make.fun/badge/threejs-fps-02.svg)](https://make.fun/c/threejs-fps-02) [![rank](https://make.fun/badge/threejs-fps-02/forcegtw/iron-district-fps/rank.svg)](https://make.fun/c/threejs-fps-02)
+[![make.fun](https://make.fun/badge/threejs-fps-02.svg)](https://make.fun/c/threejs-fps-02) [![rank](https://make.fun/badge/threejs-fps-02/forcegtw/iron-district-fps/rank.svg)](https://make.fun/c/threejs-fps-02) [![reward](https://make.fun/badge/threejs-fps-02/forcegtw/iron-district-fps/reward.svg)](https://make.fun/c/threejs-fps-02)
 
 # Iron District
 
