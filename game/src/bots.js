@@ -1,7 +1,8 @@
 // The Torch squad: three bots that walk lanes, hold positions, react to what they see,
 // plant the device at the site and shoot with the same hitscan the player uses.
 // Deterministic: every random draw comes from the shared seeded generator, so a seed
-// plays out the same round every time.
+// plays out the same round every time. HOLD_TIME below is the main pressure knob:
+// shorter holds push the squad onto the objective sooner.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { ROUTES, DEVICE_SPOT, ATTACKER_SPAWNS } from './world.js';
@@ -13,7 +14,7 @@ const EYE_STAND = 1.6;
 const EYE_CROUCH = 1.02;
 const HEIGHT_STAND = 1.72;
 const WALK_SPEED = 3.8; // slightly brisker patrol pacing keeps bots from lagging behind the player
-const HOLD_TIME = 2.6;
+const HOLD_TIME = 2.4; // trimmed so holding bots re-engage lanes a touch sooner
 const REACTION_TIME = 0.4;
 const ACCURACY = 0.08; // aim jitter in radians, wider on the move and at range
 const FIRE_GAP_BOT = 0.5;

@@ -7,6 +7,7 @@
 // the cover) and run it.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
+// HUD modules (minimap, radar) ship as plain ES modules in game/src and load with the game.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
