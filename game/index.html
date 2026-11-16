@@ -180,6 +180,39 @@
     margin-top: 8px; font-size: 12px; letter-spacing: .1em; color: var(--muted);
   }
 
+  /* The announcer: one line of large event text, centred, above the crosshair. */
+  .announcer {
+    position: fixed; left: 50%; top: 132px; transform: translateX(-50%) scale(0.94);
+    font-family: var(--font-readout); font-size: 30px; font-weight: 500;
+    letter-spacing: 0; color: var(--ink); opacity: 0;
+    text-shadow: 0 2px 18px color-mix(in srgb, var(--canvas) 90%, transparent);
+    white-space: nowrap; pointer-events: none;
+  }
+  .announcer.announcer-on { opacity: 1; }
+
+  /* Minimap: a square canvas in the top-right, clear of the objective text. */
+  #minimap-slot { position: fixed; right: 32px; top: 20px; line-height: 0; }
+  #minimap {
+    display: block; border-radius: var(--radius-panel);
+    border: 1px solid var(--hairline);
+  }
+
+  /* Detail panel (T): the armoury's numbers, one card per gun. */
+  #detail-panel {
+    position: fixed; right: 32px; top: 208px;
+    width: 224px; max-height: 52vh; overflow: auto; padding: 14px 16px;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    pointer-events: none;
+  }
+  #detail-panel[hidden] { display: none; }
+  #detail-grid { display: grid; gap: 12px; }
+  .detail-name {
+    font-size: 13px; font-weight: 500; color: var(--accent);
+    margin-bottom: 2px;
+  }
+  .detail-card .stat-row { font-size: 11px; line-height: 1.5; }
+
   @media (prefers-reduced-motion: reduce) {
     #hitmarker, #play, #banner, #damage-flash, #health-bar { transition-duration: 0.01ms; }
   }
@@ -213,6 +246,9 @@
     <h3>Round report</h3>
     <div id="stats-grid"></div>
   </div>
+  <div id="announcer" aria-live="polite"></div>
+  <div id="minimap-slot"></div>
+  <div id="detail-panel" hidden><div id="detail-grid"></div></div>
 </div>
 
 <div id="buy-menu" hidden>

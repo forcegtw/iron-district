@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
 export const CAPTURE_SPOT = [0, -4.0];   // centre of the raised rail platform
-const CAPTURE_RADIUS = 4.4;              // covers the platform deck between its rails
+export const CAPTURE_RADIUS = 4.4;       // covers the platform deck between its rails
 const CAPTURE_TIME = 6.0;                // seconds of uncontested standing to own it
 const PAYOUT_INTERVAL = 15.0;            // seconds of ownership between payouts
 const PAYOUT_AMOUNT = 500;               // per payout, deliberately under a kill bounty

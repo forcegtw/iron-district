@@ -45,6 +45,8 @@ export function createHud() {
   const buyList = document.getElementById('buy-list');
   const statsPanel = document.getElementById('stats-panel');
   const statsGrid = document.getElementById('stats-grid');
+  const detailPanel = document.getElementById('detail-panel');
+  const detailGrid = document.getElementById('detail-grid');
   const buyMoney = document.getElementById('buy-money');
   const banner = document.getElementById('banner');
   const damageFlash = document.getElementById('damage-flash');
@@ -93,6 +95,37 @@ export function createHud() {
       statsPanel.hidden = false;
       clearTimeout(statsPanel._t);
       statsPanel._t = setTimeout(() => { statsPanel.hidden = true; }, 6000);
+    },
+    // T panel: one card per gun with its numbers, or nothing when closed.
+    toggleDetail(cards) {
+      if (!detailPanel || !detailGrid) return;
+      if (!cards) {
+        detailPanel.hidden = true;
+        return;
+      }
+      detailGrid.innerHTML = '';
+      for (const card of cards) {
+        const box = document.createElement('div');
+        box.className = 'detail-card';
+        const name = document.createElement('div');
+        name.className = 'detail-name';
+        name.textContent = card.name;
+        box.appendChild(name);
+        for (const [label, value] of card.lines) {
+          const row = document.createElement('div');
+          row.className = 'stat-row';
+          const l = document.createElement('span');
+          l.className = 'stat-label';
+          l.textContent = label;
+          const v = document.createElement('span');
+          v.className = 'stat-value';
+          v.textContent = value;
+          row.append(l, v);
+          box.appendChild(row);
+        }
+        detailGrid.appendChild(box);
+      }
+      detailPanel.hidden = false;
     },
     setAmmo(mag, reserve) {
       if (mag === lastMag && reserve === lastReserve) return;

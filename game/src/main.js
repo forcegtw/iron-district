@@ -20,6 +20,11 @@ import { createKillcam } from './killcam.js';
 import { createStats } from './stats.js';
 import { createObjectives } from './objectives.js';
 import { createSpotting } from './spotting.js';
+import { registerExtraGuns, pelletDirections, rangeScale, createRecoilModel, extraBuyItems, gunDetail } from './weapons2.js';
+import { createGrenades as createGrenadesV2 } from './grenades2.js';
+import { createMinimap } from './minimap.js';
+import { createParticles } from './particles.js';
+import { createAnnouncer } from './announce.js';
 import { hasLineOfSight } from './physics.js';
 
 const FIXED_STEP = 1 / 60;
@@ -27,6 +32,14 @@ const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
 const MAX_GRENADES = 2;
+
+// The two extra guns register into the shared table before anything reads it: the
+// weapon models, the buy catalog and the bot loadouts all see them for free.
+registerExtraGuns(GUNS);
+
+// Cook state for the held grenade: G pressed begins burning the fuse and drawing the
+// arc, release throws with whatever fuse is left. A tap is a full-fuse lob.
+const cook = { holding: false, burned: 0 };
 
 // Seeded generator for everything the simulation draws: spread jitter, bot decisions.
 // Rendering reads no random numbers, so a seed replays identically.
@@ -66,6 +79,12 @@ const player = createPlayer(world.colliders);
 const input = createInput(renderer.domElement, onLockChange);
 const device = createDevice(scene);
 const grenades = createGrenades(scene, world.colliders);
+const grenades2 = createGrenadesV2(scene, world.colliders);
+const particles = createParticles(scene, random);
+const announcer = createAnnouncer();
+announcer.bind(document.getElementById('announcer'));
+const minimap = createMinimap(document.getElementById('minimap-slot'));
+const recoilModel = createRecoilModel();
 const killcam = createKillcam();
 const stats = createStats();
 const spotting = createSpotting(scene);
@@ -73,6 +92,7 @@ const objectives = createObjectives(scene, {
   onCaptured() {
     hud.setObjective('Mid point secured. It pays every fifteen seconds.');
     hud.showBanner('Mid point secured. +$500 every 15 s.');
+    announcer.captured();
   },
   onPayout(amount) {
     rounds.state.money = Math.min(9000, rounds.state.money + amount);
@@ -82,6 +102,7 @@ const objectives = createObjectives(scene, {
   },
   onLost() {
     hud.setObjective('Mid point lost. Take it back.');
+    announcer.captureLost();
   },
 });
 
@@ -158,8 +179,12 @@ function fireHitscan(origin, directionV, gun, shooter) {
     tracerEnd.copy(origin).addScaledVector(directionV, 90);
     spawnTracer(origin, tracerEnd);
   }
-  if (!hit || hit.kind !== 'body') return;
-  const damage = gun.damage * (hit.part === 'head' ? gun.headMult : 1);
+  if (!hit || hit.kind !== 'body') {
+    if (hit && hit.point) particles.dustAt(hit.point);
+    return;
+  }
+  const scale = rangeScale(gun, hit.distance);
+  const damage = gun.damage * scale * (hit.part === 'head' ? gun.headMult : 1);
   const target = hit.body;
   if (target === body) {
     body.health -= damage;
@@ -178,6 +203,7 @@ function fireHitscan(origin, directionV, gun, shooter) {
     }
     return;
   }
+  if (hit.point) particles.bloodAt(hit.point);
   stats.recordHit(GUN_KIND.get(gun), hit.part, damage);
   const killed = bots.damage(target, damage, hit.part);
   hud.hitMarker(killed, markerHoldMs);
@@ -203,6 +229,7 @@ const bots = createBots(scene, world.colliders, combat, random, {
     device.group.visible = true;
     hud.showBanner('The device is planted.');
     hud.setObjective('Defuse the device or eliminate Torch.');
+    announcer.bombPlanted();
   },
   plantTime() {
     return rounds.constants.PLANT_TIME;
@@ -227,6 +254,11 @@ const rounds = createRounds({
     spotting.reset();
     objectives.reset();
     killcam.cancel();
+    particles.reset();
+    announcer.clear();
+    recoilModel.reset();
+    grenades2.hideArc();
+    cook.holding = false;
     hud.setScore(s.scores.coal, s.scores.torch);
     hud.setMoney(s.money);
     hud.setHealth(100);
@@ -243,6 +275,8 @@ const rounds = createRounds({
     closeBuy();
     stats.recordRound(s.result === 'coal');
     hud.renderStats(stats);
+    if (s.result === 'coal') announcer.roundWin();
+    else announcer.roundLost();
     hud.showBanner(s.result === 'coal' ? `Round won. ${s.reason}` : `Round lost. ${s.reason}`, 3000);
     hud.setScore(s.scores.coal, s.scores.torch);
     hud.setMoney(s.money);
@@ -255,11 +289,23 @@ const rounds = createRounds({
 
 // The buy catalog, re-priced against the purse every time the menu opens.
 const BUY_ITEMS = [
+  { kind: 'cinder', name: GUNS.cinder.name, price: GUNS.cinder.price },
   { kind: 'smg', name: GUNS.smg.name, price: GUNS.smg.price },
+  { kind: 'shotgun', name: GUNS.shotgun.name, price: GUNS.shotgun.price },
   { kind: 'rifle', name: GUNS.rifle.name, price: GUNS.rifle.price },
   { kind: 'sniper', name: GUNS.sniper.name, price: GUNS.sniper.price },
   { kind: 'grenade', name: 'Frag grenade', price: GRENADE_PRICE },
 ];
+
+// The T panel: the same catalog with per-gun detail lines, for players who want the
+// numbers before spending. It opens alongside the buy menu, never instead of it.
+let detailOpen = false;
+function toggleDetail() {
+  detailOpen = !detailOpen;
+  hud.toggleDetail(detailOpen
+    ? Object.keys(GUNS).map((kind) => gunDetail(kind, GUNS[kind]))
+    : null);
+}
 
 function buyCatalog() {
   for (const item of BUY_ITEMS) {
@@ -333,19 +379,41 @@ function aimAt(point) {
 }
 
 const direction = new THREE.Vector3();
+// One scratch array for pellet directions, sized once for the shotgun's cone.
+const pelletScratch = [];
+const muzzlePoint = new THREE.Vector3();
 
 function shoot(spread) {
   if (!weapon.takeRound()) return false;
-  camera.getWorldDirection(direction);
-  direction.x += (random() * 2 - 1) * spread;
-  direction.y += (random() * 2 - 1) * spread;
-  direction.z += (random() * 2 - 1) * spread;
-  direction.normalize();
-  scene.updateMatrixWorld(true);
-  fireHitscan(camera.position, direction, weapon.gun(), body);
-  weapon.pullTrigger();
   const gunDef = weapon.gun();
-  player.recoil(gunDef.recoil + random() * 0.003, (random() * 2 - 1) * 0.004);
+  camera.getWorldDirection(direction);
+  // The old spread model stays for single-projectile guns; the scatter gun samples
+  // its own cone so each pellet flies its own line.
+  if ((gunDef.pellets ?? 1) > 1) {
+    direction.x += (random() * 2 - 1) * spread;
+    direction.y += (random() * 2 - 1) * spread;
+    direction.z += (random() * 2 - 1) * spread;
+    direction.normalize();
+    const count = pelletDirections(gunDef, direction, random, pelletScratch);
+    scene.updateMatrixWorld(true);
+    muzzlePoint.copy(camera.position).addScaledVector(direction, 0.7);
+    particles.muzzleAt(muzzlePoint);
+    for (let index = 0; index < count; index += 1) {
+      fireHitscan(camera.position, pelletScratch[index], gunDef, body);
+    }
+  } else {
+    direction.x += (random() * 2 - 1) * spread;
+    direction.y += (random() * 2 - 1) * spread;
+    direction.z += (random() * 2 - 1) * spread;
+    direction.normalize();
+    scene.updateMatrixWorld(true);
+    muzzlePoint.copy(camera.position).addScaledVector(direction, 0.7);
+    particles.muzzleAt(muzzlePoint);
+    fireHitscan(camera.position, direction, gunDef, body);
+  }
+  weapon.pullTrigger();
+  const kick = recoilModel.shot(gunDef, random);
+  player.recoil(kick.pitch + random() * 0.003, kick.yaw + (random() * 2 - 1) * 0.004);
   hud.setAmmo(weapon.state.mag, weapon.state.reserve);
   return true;
 }
@@ -408,6 +476,32 @@ function stepDefuse(dt) {
   hud.setObjective(`Defusing: ${Math.round((s.defuseProgress / rounds.constants.DEFUSE_TIME) * 100)}%`);
 }
 
+// Grenade throw with cook: pressing G starts the burn and draws the arc, releasing
+// throws with the remaining fuse. The whole flow lives in the frame update because
+// it is input-shaped; the simulation only sees the thrown can.
+function stepGrenadeThrow() {
+  const holding = input.state.keys.has('KeyG') && weapon.state.grenades > 0;
+  if (holding && !cook.holding) {
+    cook.holding = true;
+    cook.burned = 0;
+  }
+  if (cook.holding) {
+    if (holding) {
+      cook.burned += FIXED_STEP;
+      camera.getWorldDirection(direction);
+      grenades2.previewArc(camera.position, direction, grenades2.constants.THROW_SPEED);
+    } else {
+      cook.holding = false;
+      grenades2.hideArc();
+      weapon.state.grenades -= 1;
+      state.ownedGrenades = weapon.state.grenades;
+      hud.setGrenades(weapon.state.grenades);
+      camera.getWorldDirection(direction);
+      grenades2.throwGrenade(camera.position, direction, grenades2.constants.THROW_SPEED, cook.burned);
+    }
+  }
+}
+
 function step(dt) {
   elapsed += dt;
   rounds.step(dt, {
@@ -420,14 +514,30 @@ function step(dt) {
     player.step(dt, input.state.keys);
     stepDefuse(dt);
     weapon.step(dt);
+    stepGrenadeThrow();
     const targets = bodiesList();
     for (let index = 0; index < bots.bots.length; index += 1) {
       bots.step(bots.bots[index], dt, targets, rounds.state);
     }
     grenades.step(dt, blastAt);
+    grenades2.step(dt, blastAt);
     device.step(elapsed, rounds.state.devicePlanted);
     objectives.step(dt, body, bots.bots, rounds.state);
     spotting.step(dt, body, bots.bots, (from, to) => hasLineOfSight(from, to, world.colliders), input.state.keys, rounds.state);
+    particles.step(dt);
+    announcer.step(dt * 1000);
+    // Recoil walk-back runs every step but contributes nothing while firing.
+    const relax = recoilModel.step(dt, weapon.gun(), input.state.firing && rounds.state.phase === 'live');
+    if (relax.pitch !== 0 || relax.yaw !== 0) player.recoil(relax.pitch, relax.yaw);
+    minimap.draw({
+      playerX: body.position.x,
+      playerZ: body.position.z,
+      playerYaw: body.yaw,
+      spottedBots: bots.bots.filter((bot) => spotting.isSpotted(bot)),
+      devicePlanted: rounds.state.devicePlanted,
+      captureOwner: objectives.state.owner,
+      captureContested: objectives.state.contested,
+    });
   }
 
   // Killcam: while it runs the orbit owns the camera; the first-person pose comes
@@ -463,11 +573,16 @@ hud.onPlay(() => {
 hud.onBuyPick(handleBuyPick);
 hud.onBuyClose(closeBuy);
 
-// Buy menu toggle on B, only between rounds.
+// Buy menu toggle on B, weapon details on T, both only between rounds or live play
+// outside pointer lock; the detail panel never pauses anything.
 window.addEventListener('keydown', (event) => {
-  if (event.code !== 'KeyB' || shot) return;
-  if (state.buyOpen) closeBuy();
-  else if (rounds.state.phase === 'buy') openBuy();
+  if (shot) return;
+  if (event.code === 'KeyB') {
+    if (state.buyOpen) closeBuy();
+    else if (rounds.state.phase === 'buy') openBuy();
+  } else if (event.code === 'KeyT') {
+    toggleDetail();
+  }
 });
 
 function frame(now) {
