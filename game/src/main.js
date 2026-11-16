@@ -16,6 +16,10 @@ import { createRounds } from './rounds.js';
 import { createDevice } from './device.js';
 import { createGrenades } from './grenades.js';
 import { createHud } from './hud.js';
+import { createKillcam } from './killcam.js';
+import { createStats } from './stats.js';
+import { createObjectives } from './objectives.js';
+import { createSpotting } from './spotting.js';
 import { hasLineOfSight } from './physics.js';
 
 const FIXED_STEP = 1 / 60;
@@ -62,6 +66,24 @@ const player = createPlayer(world.colliders);
 const input = createInput(renderer.domElement, onLockChange);
 const device = createDevice(scene);
 const grenades = createGrenades(scene, world.colliders);
+const killcam = createKillcam();
+const stats = createStats();
+const spotting = createSpotting(scene);
+const objectives = createObjectives(scene, {
+  onCaptured() {
+    hud.setObjective('Mid point secured. It pays every fifteen seconds.');
+    hud.showBanner('Mid point secured. +$500 every 15 s.');
+  },
+  onPayout(amount) {
+    rounds.state.money = Math.min(9000, rounds.state.money + amount);
+    stats.recordCapturePayout();
+    hud.setMoney(rounds.state.money);
+    hud.showBanner(`Mid point pays $${amount}.`, 1400);
+  },
+  onLost() {
+    hud.setObjective('Mid point lost. Take it back.');
+  },
+});
 
 const body = player.state;
 
@@ -122,9 +144,14 @@ function stepTracers(dt) {
 }
 
 const tracerEnd = new THREE.Vector3();
+// Reverse lookup from a gun table entry to its kind, built once so a kill can be
+// filed under the right weapon without allocating in the shot path.
+const GUN_KIND = new Map();
+for (const kind of Object.keys(GUNS)) GUN_KIND.set(GUNS[kind], kind);
 
 // The single hitscan path for every shot in the game.
 function fireHitscan(origin, directionV, gun, shooter) {
+  stats.recordShot(GUN_KIND.get(gun));
   const hit = combat.trace(origin, directionV, 90, bodiesList(), shooter.team);
   if (hit && hit.point) spawnTracer(origin, hit.point);
   else {
@@ -136,17 +163,26 @@ function fireHitscan(origin, directionV, gun, shooter) {
   const target = hit.body;
   if (target === body) {
     body.health -= damage;
+    stats.recordDamageTaken(damage);
     hud.damageFlashPulse();
     hud.setHealth(Math.max(0, Math.round(body.health)));
     if (body.health <= 0 && body.alive) {
       body.alive = false;
+      stats.recordDeath();
       hud.showBanner('You are down. Spectating until the round ends.');
+      // Drop into the killcam orbit over whoever landed the shot, unless the
+      // grenade blast path called with no shooter geometry to orbit.
+      if (!shot && shooter && shooter.position) {
+        killcam.start(shooter.position, body.position);
+      }
     }
     return;
   }
+  stats.recordHit(GUN_KIND.get(gun), hit.part, damage);
   const killed = bots.damage(target, damage, hit.part);
   hud.hitMarker(killed, markerHoldMs);
   if (killed) {
+    stats.recordKill(GUN_KIND.get(gun));
     state.kills += 1;
     rounds.state.killMoney += rounds.constants.KILL_REWARD;
     hud.setMoney(rounds.state.money + rounds.state.killMoney);
@@ -188,6 +224,9 @@ const rounds = createRounds({
     bots.spawnAll();
     device.group.visible = false;
     state.blasted = false;
+    spotting.reset();
+    objectives.reset();
+    killcam.cancel();
     hud.setScore(s.scores.coal, s.scores.torch);
     hud.setMoney(s.money);
     hud.setHealth(100);
@@ -202,6 +241,8 @@ const rounds = createRounds({
   },
   onRoundEnd(s) {
     closeBuy();
+    stats.recordRound(s.result === 'coal');
+    hud.renderStats(stats);
     hud.showBanner(s.result === 'coal' ? `Round won. ${s.reason}` : `Round lost. ${s.reason}`, 3000);
     hud.setScore(s.scores.coal, s.scores.torch);
     hud.setMoney(s.money);
@@ -319,9 +360,22 @@ function blastAt(point) {
   const distance = Math.hypot(dx, dy, dz);
   if (distance < GRENADE_RADIUS && body.alive) {
     body.health -= GRENADE_DAMAGE * (1 - distance / GRENADE_RADIUS);
+    stats.recordDamageTaken(GRENADE_DAMAGE * (1 - distance / GRENADE_RADIUS));
     hud.damageFlashPulse();
     hud.setHealth(Math.max(0, Math.round(body.health)));
-    if (body.health <= 0 && body.alive) body.alive = false;
+    if (body.health <= 0 && body.alive) {
+      body.alive = false;
+      stats.recordDeath();
+      // Attribute the blast to the nearest live bot so the killcam has a subject.
+      let nearest = null;
+      let nearestDistance = Infinity;
+      for (const bot of bots.bots) {
+        if (!bot.alive) continue;
+        const d = Math.hypot(bot.body.position.x - point.x, bot.body.position.z - point.z);
+        if (d < nearestDistance) { nearestDistance = d; nearest = bot; }
+      }
+      if (!shot && nearest) killcam.start(nearest.body.position, body.position);
+    }
   }
   bots.grenadeBlast(blastPoint);
   for (let index = 0; index < 6; index += 1) {
@@ -372,6 +426,16 @@ function step(dt) {
     }
     grenades.step(dt, blastAt);
     device.step(elapsed, rounds.state.devicePlanted);
+    objectives.step(dt, body, bots.bots, rounds.state);
+    spotting.step(dt, body, bots.bots, (from, to) => hasLineOfSight(from, to, world.colliders), input.state.keys, rounds.state);
+  }
+
+  // Killcam: while it runs the orbit owns the camera; the first-person pose comes
+  // back on the step it ends. Shot mode never starts one, so captures stay posed.
+  if (killcam.active()) {
+    if (!killcam.step(camera, dt)) syncCamera();
+    stepTracers(dt);
+    return;
   }
 
   // Detonation: one blast when the fuse runs out, then the round has already ended.

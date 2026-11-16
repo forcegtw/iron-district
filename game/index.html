@@ -158,6 +158,28 @@
   .buy-item:hover:not(:disabled), .buy-close:hover { border-color: var(--accent); }
   .buy-item:disabled { color: var(--muted); cursor: not-allowed; }
 
+  #stats-panel {
+    position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+    width: min(360px, 100%); padding: 16px 20px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    pointer-events: none;
+  }
+  #stats-panel[hidden] { display: none; }
+  #stats-panel h3 {
+    margin: 0 0 8px; font-size: 13px; font-weight: 500;
+    letter-spacing: .1em; color: var(--muted);
+  }
+  .stat-row {
+    display: flex; justify-content: space-between; gap: 16px;
+    font-family: var(--font-readout); font-size: 13px; line-height: 1.7;
+  }
+  .stat-label { color: var(--muted); }
+  .stat-value { color: var(--ink); }
+  .stat-title {
+    margin-top: 8px; font-size: 12px; letter-spacing: .1em; color: var(--muted);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     #hitmarker, #play, #banner, #damage-flash, #health-bar { transition-duration: 0.01ms; }
   }
@@ -187,6 +209,10 @@
   </div>
   <div id="grenade-count">G x0</div>
   <div id="ammo"><span id="ammo-mag">30</span><span id="ammo-reserve">/ 90</span></div>
+  <div id="stats-panel" hidden>
+    <h3>Round report</h3>
+    <div id="stats-grid"></div>
+  </div>
 </div>
 
 <div id="buy-menu" hidden>

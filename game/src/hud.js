@@ -43,6 +43,8 @@ export function createHud() {
   const roundLabel = document.getElementById('round-label');
   const buyMenu = document.getElementById('buy-menu');
   const buyList = document.getElementById('buy-list');
+  const statsPanel = document.getElementById('stats-panel');
+  const statsGrid = document.getElementById('stats-grid');
   const buyMoney = document.getElementById('buy-money');
   const banner = document.getElementById('banner');
   const damageFlash = document.getElementById('damage-flash');
@@ -84,6 +86,14 @@ export function createHud() {
   }
 
   return {
+    // Fills the end-of-round stats ledger from the stats module's own renderer.
+    renderStats(stats) {
+      if (!statsPanel || !statsGrid) return;
+      stats.render(statsGrid);
+      statsPanel.hidden = false;
+      clearTimeout(statsPanel._t);
+      statsPanel._t = setTimeout(() => { statsPanel.hidden = true; }, 6000);
+    },
     setAmmo(mag, reserve) {
       if (mag === lastMag && reserve === lastReserve) return;
       lastMag = mag;
